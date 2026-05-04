@@ -1,0 +1,156 @@
+name: Backend Deploy
+
+on:
+  push:
+    branches:
+      - development
+      - master
+    paths:
+      - '**'
+      - '.github/workflows/backend-deploy.yml'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+
+  # =========================
+  #  STAGING
+  # =========================
+  deploy-staging:
+    if: github.ref_name == 'development'
+    runs-on: codebuild-petpooja-ai-agent-prod-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y unzip jq docker.io
+
+      - name: Verify Docker
+        run: |
+          docker --version
+          docker info
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set environment variables
+        run: |
+          echo "ENV_NAME=staging" >> $GITHUB_ENV
+          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
+          echo "REPOSITORY_URI=${{ secrets.BACKEND_ECR_STG }}" >> $GITHUB_ENV
+          echo "S3_ENV_PATH=${{ secrets.BACKEND_S3_ENV_STG }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_ENV
+
+      - name: Build and Push to ECR
+        run: |
+          set -e
+
+          echo "Downloading env file from S3..."
+          aws s3 cp "$S3_ENV_PATH" .env.production
+
+          echo "Login to ECR..."
+          ECR_REGISTRY=$(echo $REPOSITORY_URI | cut -d/ -f1)
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          echo "Build Docker image..."
+          docker build -t $REPOSITORY_URI:latest -f Dockerfile .
+
+          echo "Tag image..."
+          docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+
+          echo "Push image..."
+          docker push $REPOSITORY_URI:latest
+          docker push $REPOSITORY_URI:$IMAGE_TAG
+
+          echo "Cleanup..."
+          docker rmi $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG || true
+          rm -f .env.production
+
+      - name: Cleanup Docker
+        if: always()
+        run: docker builder prune --all -f || true
+
+      - name: Pipeline complete
+        run: |
+          echo "Pipeline complete. Image pushed to ECR"
+          echo "Image: $REPOSITORY_URI:$IMAGE_TAG"
+
+  # =========================
+  #  PRODUCTION
+  # =========================
+  deploy-production:
+    if: github.ref_name == 'master'
+    runs-on: codebuild-petpooja-ai-agent-prod-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y unzip jq docker.io
+
+      - name: Verify Docker
+        run: |
+          docker --version
+          docker info
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set environment variables
+        run: |
+          echo "ENV_NAME=production" >> $GITHUB_ENV
+          echo "AWS_REGION=${{ secrets.AWS_REGION }}" >> $GITHUB_ENV
+          echo "REPOSITORY_URI=${{ secrets.BACKEND_ECR_PROD }}" >> $GITHUB_ENV
+          echo "S3_ENV_PATH=${{ secrets.BACKEND_S3_ENV_PROD }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_ENV
+
+      - name: Build and Push to ECR
+        run: |
+          set -e
+
+          echo "Downloading env file from S3..."
+          aws s3 cp "$S3_ENV_PATH" .env.production
+
+          echo "Login to ECR..."
+          ECR_REGISTRY=$(echo $REPOSITORY_URI | cut -d/ -f1)
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+          echo "Build Docker image..."
+          docker build -t $REPOSITORY_URI:latest -f Dockerfile .
+
+          echo "Tag image..."
+          docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+
+          echo "Push image..."
+          docker push $REPOSITORY_URI:latest
+          docker push $REPOSITORY_URI:$IMAGE_TAG
+
+          echo "Cleanup..."
+          docker rmi $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG || true
+          rm -f .env.production
+
+      - name: Cleanup Docker
+        if: always()
+        run: docker builder prune --all -f || true
+
+      - name: Pipeline complete
+        run: |
+          echo "Pipeline complete. Image pushed to ECR"
+          echo "Image: $REPOSITORY_URI:$IMAGE_TAG"
